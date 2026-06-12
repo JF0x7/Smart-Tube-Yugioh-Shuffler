@@ -49,6 +49,8 @@ final class SmartTubeControllerViewModel: ObservableObject {
     @Published var queue: [QueueItem] = []
     @Published var suggestions: [QueueItem] = []
     @Published var recommended: [QueueItem] = []
+    @Published var searchResults: [QueueItem] = []
+    @Published var isSearching: Bool = false
     @Published var theater: TheaterState?
     @Published var cec: SmartTubeCECState?
     @Published var videoFormats: [RemoteFormat] = []
@@ -112,6 +114,7 @@ final class SmartTubeControllerViewModel: ObservableObject {
 
     var stateText: String { self.player?.state.rawValue.capitalized ?? "Idle" }
     var isPlaying: Bool { self.player?.state == .playing }
+    var isBuffering: Bool { self.player?.state == .buffering }
     var positionMs: Int { self.player?.positionMs ?? 0 }
     var durationMs: Int { self.player?.durationMs ?? self.player?.video?.durationMs ?? 0 }
 
@@ -347,7 +350,7 @@ final class SmartTubeControllerViewModel: ObservableObject {
         }
 
         do {
-            self.queue = try await c.getQueue()
+            self.queue = Self.stableOrderMerge(old: self.queue, new: try await c.getQueue())
             self.log("Queue refreshed: \(self.queue.count) items")
         } catch {
             self.log("Queue refresh failed: \(error.localizedDescription)")
@@ -382,7 +385,7 @@ final class SmartTubeControllerViewModel: ObservableObject {
             let videoId = self.player?.video?.videoId
             if videoId != self.lastVideoId {
                 self.lastVideoId = videoId
-                await self.refreshSuggestions()
+                await self.refreshSuggestions(replace: true)
                 await self.refreshTracks()
             }
         } catch {
@@ -394,8 +397,38 @@ final class SmartTubeControllerViewModel: ObservableObject {
                 self.log("Player poll failed: \(message)")
             }
         }
-        do { self.queue = try await c.getQueue() } catch { }
+        do { self.queue = Self.stableOrderMerge(old: self.queue, new: try await c.getQueue()) } catch { }
         do { self.theater = try await c.getTheater() } catch { }
+    }
+
+    /// Re-applies the previous on-screen order to a freshly fetched list. SmartTube's
+    /// Playlist moves replayed videos to the end and the recommended feed reshuffles
+    /// on every fetch, so a raw replacement makes rows jump around under the 2s poll.
+    /// Items keep their old position (with refreshed data, e.g. is_current); genuinely
+    /// new items append in server order; vanished items drop out.
+    static func stableOrderMerge(old: [QueueItem], new: [QueueItem]) -> [QueueItem] {
+        guard !old.isEmpty, !new.isEmpty else { return new }
+        var fresh: [String: QueueItem] = [:]
+        for item in new {
+            guard let id = item.videoId else { continue }
+            // keep the first occurrence if the server ever sends duplicates
+            if fresh[id] == nil { fresh[id] = item }
+        }
+        var merged: [QueueItem] = []
+        for item in old {
+            guard let id = item.videoId, let updated = fresh.removeValue(forKey: id) else { continue }
+            merged.append(updated)
+        }
+        for item in new {
+            if let id = item.videoId {
+                guard let remaining = fresh.removeValue(forKey: id) else { continue }
+                merged.append(remaining)
+            } else {
+                // no videoId to match on — keep it rather than silently dropping it
+                merged.append(item)
+            }
+        }
+        return merged
     }
 
     func refreshTracks() async {
@@ -668,6 +701,36 @@ final class SmartTubeControllerViewModel: ObservableObject {
         }
     }
 
+    /// Fetches search results for the picker without touching playback. Quiet on
+    /// failure (no isBusy/phase churn) — this runs on every keystroke debounce.
+    func search(_ query: String) async {
+        let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, let c = self.client else {
+            self.searchResults = []
+            return
+        }
+        self.isSearching = true
+        defer { self.isSearching = false }
+        do {
+            self.searchResults = try await c.searchResults(text)
+        } catch is CancellationError {
+            // superseded by a newer keystroke
+        } catch {
+            self.log("Search failed: \(error.localizedDescription)")
+            self.searchResults = []
+        }
+    }
+
+    func clearSearchResults() {
+        self.searchResults = []
+    }
+
+    func playVideoId(_ videoId: String) async {
+        await self.run("Play video") {
+            try await self.clientOrThrow().openVideoId(videoId)
+        }
+    }
+
     func addToQueue(_ input: String) async {
         let id = Self.extractVideoId(input.trimmingCharacters(in: .whitespacesAndNewlines))
         guard !id.isEmpty else { return }
@@ -697,10 +760,13 @@ final class SmartTubeControllerViewModel: ObservableObject {
         }
     }
 
-    func refreshSuggestions() async {
+    /// `replace: true` swaps the list wholesale — used when the playing video changes
+    /// and the related list belongs to a new video. Default keeps on-screen order stable.
+    func refreshSuggestions(replace: Bool = false) async {
         guard let c = self.client else { return }
         do {
-            self.suggestions = try await c.getSuggestions()
+            let fetched = try await c.getSuggestions()
+            self.suggestions = replace ? fetched : Self.stableOrderMerge(old: self.suggestions, new: fetched)
             self.log("Suggestions refreshed: \(self.suggestions.count)")
         } catch {
             self.log("Suggestions refresh failed: \(error.localizedDescription)")
@@ -725,7 +791,7 @@ final class SmartTubeControllerViewModel: ObservableObject {
     func refreshRecommended() async {
         guard let c = self.client else { return }
         do {
-            self.recommended = try await c.getRecommended()
+            self.recommended = Self.stableOrderMerge(old: self.recommended, new: try await c.getRecommended())
             self.log("Recommended refreshed: \(self.recommended.count)")
         } catch {
             self.log("Recommended refresh failed: \(error.localizedDescription)")
@@ -857,7 +923,7 @@ struct ContentView: View {
                 .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 360)
         } detail: {
             NowPlayingView(vm: self.vm)
-                .frame(minWidth: 380, minHeight: 480)
+                .frame(minWidth: 420, minHeight: 480)
         }
         .navigationTitle("SmartTube")
         .navigationSubtitle(self.vm.player?.video?.title ?? "")
@@ -918,20 +984,26 @@ private struct ConnectionStatus: View {
     @ObservedObject var vm: SmartTubeControllerViewModel
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 7) {
             indicator("API", active: self.vm.isAPIConnected, help: "SmartTube REST API")
             indicator("Live", active: self.vm.isRealtimeConnected, help: "Realtime WebSocket")
             indicator("ADB", active: self.vm.isBridgeConnected, help: "ADB bridge")
         }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 4)
+        .background(
+            Capsule(style: .continuous).fill(.quaternary.opacity(0.6))
+        )
+        .fixedSize()
     }
 
     private func indicator(_ title: String, active: Bool, help: String) -> some View {
-        HStack(spacing: 4) {
-            Image(systemName: active ? "circle.fill" : "circle")
-                .font(.system(size: 7))
-                .foregroundStyle(active ? Color.green : Color.secondary)
+        HStack(spacing: 3) {
+            Circle()
+                .fill(active ? Color.green : Color.secondary.opacity(0.55))
+                .frame(width: 6, height: 6)
             Text(title)
-                .font(.caption)
+                .font(.caption2.weight(.medium))
                 .foregroundStyle(active ? .primary : .secondary)
         }
         .help("\(help): \(active ? "connected" : "offline")")
@@ -980,7 +1052,10 @@ private struct QueueSidebar: View {
                                 }
                             }
                         } label: {
-                            VideoRow(item: item)
+                            VideoRow(
+                                item: item,
+                                highlighted: item.videoId != nil && item.videoId == self.vm.player?.video?.videoId
+                            )
                         }
                         .buttonStyle(.plain)
                         .contextMenu {
@@ -1044,8 +1119,13 @@ private struct QueueSidebar: View {
 }
 
 // Rich video row: thumbnail with duration badge, title, channel.
+// `highlighted` overrides the server's is_current flag for lists that don't
+// carry it (related/recommended), matching against the playing video instead.
 private struct VideoRow: View {
     let item: QueueItem
+    var highlighted: Bool?
+
+    private var isNowPlaying: Bool { self.highlighted ?? (self.item.isCurrent == true) }
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -1088,16 +1168,23 @@ private struct VideoRow: View {
                         .padding(3)
                 }
 
-                if self.item.isCurrent == true {
+                if self.isNowPlaying {
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
                         .strokeBorder(Color.accentColor, lineWidth: 2)
                         .frame(width: 92, height: 52)
                 }
             }
             VStack(alignment: .leading, spacing: 2) {
-                Text(self.item.title ?? self.item.videoId ?? "Untitled")
-                    .font(.callout)
-                    .lineLimit(2)
+                HStack(spacing: 5) {
+                    if self.isNowPlaying {
+                        Image(systemName: "speaker.wave.2.fill")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(Color.accentColor)
+                    }
+                    Text(self.item.title ?? self.item.videoId ?? "Untitled")
+                        .font(.callout.weight(self.isNowPlaying ? .semibold : .regular))
+                        .lineLimit(2)
+                }
                 if let author = self.item.author, !author.isEmpty {
                     Text(author)
                         .font(.caption)
@@ -1108,7 +1195,13 @@ private struct VideoRow: View {
             Spacer(minLength: 0)
         }
         .padding(.vertical, 3)
+        .padding(.horizontal, 5)
         .contentShape(Rectangle())
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.accentColor.opacity(self.isNowPlaying ? 0.14 : 0))
+        )
+        .padding(.horizontal, -5)
     }
 }
 
@@ -1127,6 +1220,10 @@ private struct NowPlayingView: View {
     @State private var rearLevel: Double = 8
     @State private var immersiveAE = false
     @State private var soundMode: SmartTubeSoundMode = .cinema
+    @State private var controlsExpanded = false
+    @State private var titlebarHeight: CGFloat = 0
+    @State private var searchDebounce: Task<Void, Never>?
+    @Namespace private var controlsGlassNamespace
 
     private var isEmpty: Bool { self.videoText.trimmingCharacters(in: .whitespaces).isEmpty }
 
@@ -1136,7 +1233,12 @@ private struct NowPlayingView: View {
             self.playBar
         }
         .padding(16)
+        // The split-view detail reports no top safe-area inset on macOS 26, so the
+        // content would otherwise draw beneath the Liquid Glass toolbar. Measure the
+        // titlebar+toolbar height from the window and pad the card down past it.
+        .padding(.top, self.titlebarHeight)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(TitlebarHeightReader(height: self.$titlebarHeight))
         .onChange(of: self.vm.positionMs) { _, newValue in
             if !self.isDraggingSeek { self.seekValue = Double(newValue) }
         }
@@ -1165,25 +1267,45 @@ private struct NowPlayingView: View {
         ZStack {
             self.artworkFill
             LinearGradient(
-                colors: [.black.opacity(0.45), .clear, .clear, .black.opacity(0.55)],
+                colors: [.black.opacity(0.35), .clear, .clear, .black.opacity(0.72)],
                 startPoint: .top, endPoint: .bottom
             )
-            VStack {
-                HStack(alignment: .top) {
-                    self.stateChip
-                    Spacer()
-                    VStack(alignment: .trailing, spacing: 8) {
-                        self.volumeCapsule
-                        if self.vm.playerVolumeEnabled {
-                            self.playerVolumeCapsule
-                        }
+            GeometryReader { proxy in
+                let compact = proxy.size.height < 620 || proxy.size.width < 900
+                VStack {
+                    HStack(alignment: .top) {
+                        Spacer()
+                        self.topControlGroup(maxWidth: proxy.size.width - (compact ? 32 : 44))
                     }
+
+                    Spacer(minLength: compact ? 12 : 24)
+
+                    self.transportCluster
+                        .scaleEffect(compact ? 0.86 : 1)
+
+                    Spacer(minLength: compact ? 12 : 24)
+
+                    VStack(spacing: compact ? 8 : 12) {
+                        HStack(alignment: .bottom) {
+                            self.titleOverlay
+                            Spacer(minLength: 24)
+                        }
+                        .padding(.horizontal, compact ? 28 : 44)
+
+                        self.scrubber
+                            .padding(.horizontal, compact ? 22 : 30)
+                            .padding(.vertical, compact ? 8 : 10)
+                            .glassEffect(.clear.interactive().tint(.white.opacity(0.05)), in: .capsule)
+                            .overlay {
+                                Capsule().strokeBorder(.white.opacity(0.18), lineWidth: 1)
+                            }
+                            .padding(.horizontal, compact ? 18 : 28)
+
+                    }
+                    .padding(.bottom, compact ? 8 : 16)
                 }
-                Spacer()
-                self.controlPanel
-                self.audioControls
+                .padding(compact ? 16 : 22)
             }
-            .padding(22)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
@@ -1192,6 +1314,174 @@ private struct NowPlayingView: View {
                 .strokeBorder(.white.opacity(0.08), lineWidth: 1)
         )
         .shadow(color: .black.opacity(0.25), radius: 18, y: 8)
+    }
+
+    private var titleOverlay: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(self.vm.subtitle.uppercased())
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.74))
+                .lineLimit(1)
+            Text(self.vm.title)
+                .font(.system(size: 20, weight: .bold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+        }
+        .shadow(color: .black.opacity(0.85), radius: 8, y: 2)
+    }
+
+    private func topControlGroup(maxWidth: CGFloat) -> some View {
+        let preferred: CGFloat = self.vm.playerVolumeEnabled ? 330 : 306
+        let islandWidth = max(220, min(preferred, maxWidth))
+        return GlassEffectContainer(spacing: 10) {
+            if self.controlsExpanded {
+                VStack(alignment: .trailing, spacing: 0) {
+                    self.controlIslandHeader
+                    VStack(spacing: 9) {
+                        controlIslandRow(icon: "speaker.wave.3.fill", label: "TV") {
+                            self.volumeCapsule
+                        }
+                        if self.vm.playerVolumeEnabled {
+                            controlIslandRow(icon: "dial.medium", label: "Player") {
+                                self.playerVolumeCapsule
+                            }
+                        }
+                        controlIslandRow(icon: "hifispeaker.fill", label: "Subwoofer") {
+                            levelCapsule(value: self.$subwooferLevel) { level in
+                                await self.vm.setSubwoofer(level)
+                            }
+                        }
+                        controlIslandRow(icon: "surround.sound", label: "Rear") {
+                            levelCapsule(value: self.$rearLevel) { level in
+                                await self.vm.setRear(level)
+                            }
+                        }
+                        controlIslandRow(icon: "music.note", label: "Mode") {
+                            self.soundModeCapsule
+                        }
+                        controlIslandRow(icon: "airpodspro", label: "Spatial") {
+                            self.immersiveCapsule
+                        }
+                    }
+                    .padding(.top, 10)
+                    .padding(.horizontal, 2)
+                }
+                .frame(width: islandWidth)
+                .padding(.horizontal, 10)
+                .padding(.top, 8)
+                .padding(.bottom, 11)
+                .background {
+                    RoundedRectangle(cornerRadius: 30, style: .continuous)
+                        .fill(.white.opacity(0.018))
+                }
+                .glassEffect(.clear.interactive().tint(.white.opacity(0.04)), in: RoundedRectangle(cornerRadius: 30, style: .continuous))
+                .glassEffectID("controls-island", in: self.controlsGlassNamespace)
+                .glassEffectTransition(.matchedGeometry)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 30, style: .continuous)
+                        .strokeBorder(.white.opacity(0.18), lineWidth: 1)
+                }
+                .overlay(alignment: .top) {
+                    RoundedRectangle(cornerRadius: 30, style: .continuous)
+                        .trim(from: 0.04, to: 0.34)
+                        .stroke(.white.opacity(0.26), lineWidth: 1)
+                        .padding(2)
+                        .allowsHitTesting(false)
+                }
+                .shadow(color: .black.opacity(0.30), radius: 16, y: 5)
+                .transition(.asymmetric(
+                    insertion: .opacity.combined(with: .scale(scale: 0.92, anchor: .topTrailing)),
+                    removal: .opacity.combined(with: .scale(scale: 0.97, anchor: .topTrailing))
+                ))
+            } else {
+                self.controlIslandButton
+                    .glassEffectID("controls-island", in: self.controlsGlassNamespace)
+                    .glassEffectTransition(.matchedGeometry)
+            }
+        }
+        .glassEffectUnion(id: "controls-union", namespace: self.controlsGlassNamespace)
+        .animation(.smooth(duration: 0.26), value: self.controlsExpanded)
+    }
+
+    private var controlIslandButton: some View {
+        Button {
+            self.toggleControlIsland()
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 14, weight: .semibold))
+                Text("\(Int((self.volume * 100).rounded()))")
+                    .font(.system(size: 12, weight: .semibold, design: .rounded).monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.78))
+                Image(systemName: "chevron.compact.down")
+                    .font(.system(size: 13, weight: .bold))
+                    .opacity(0.72)
+            }
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.white)
+        .padding(.horizontal, 13)
+        .padding(.vertical, 8)
+        .homeTheaterGlassCapsule()
+        .help("Expand playback controls")
+    }
+
+    private var controlIslandHeader: some View {
+        Button {
+            self.toggleControlIsland()
+        } label: {
+            HStack(spacing: 8) {
+                Capsule()
+                    .fill(.white.opacity(0.42))
+                    .frame(width: 28, height: 3)
+                    .padding(.trailing, 3)
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("Audio Controls")
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.86))
+                Spacer(minLength: 10)
+                Image(systemName: "chevron.compact.up")
+                    .font(.system(size: 14, weight: .bold))
+                    .opacity(0.75)
+            }
+            .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.white)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .help("Collapse playback controls")
+    }
+
+    private func controlIslandRow<Content: View>(
+        icon: String,
+        label: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 10, weight: .semibold))
+                Text(label.uppercased())
+                    .font(.system(size: 9, weight: .bold, design: .rounded))
+                    .tracking(0.4)
+            }
+            .foregroundStyle(.white.opacity(0.62))
+            .frame(width: 76, alignment: .leading)
+
+            content()
+                .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .padding(.horizontal, 5)
+        .padding(.vertical, 3)
+    }
+
+    private func toggleControlIsland() {
+        withAnimation(.smooth(duration: 0.24)) {
+            self.controlsExpanded.toggle()
+        }
     }
 
     private var artworkFill: some View {
@@ -1250,24 +1540,22 @@ private struct NowPlayingView: View {
         }
     }
 
-    private var stateChip: some View {
-        HStack(spacing: 6) {
-            Image(systemName: self.vm.isPlaying ? "play.fill" : "pause.fill")
-                .font(.caption2)
-            Text(self.vm.stateText)
-                .font(.caption.weight(.semibold))
-        }
-        .foregroundStyle(.white)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 7)
-        .glassEffect(.regular, in: .capsule)
-    }
-
     // Draggable TV / audio-system volume bar (top-right capsule). Drives the TV's
     // actual volume, not the player's internal gain — internal volume is something
     // SmartTube re-applies per video and isn't what a remote should control.
     private var volumeCapsule: some View {
         HStack(spacing: 12) {
+            Button {
+                Task { await self.vm.toggleTVMute() }
+            } label: {
+                Image(systemName: self.vm.theater?.muted == true ? "speaker.slash.fill"
+                      : self.volume < 0.5 ? "speaker.wave.1.fill" : "speaker.wave.3.fill")
+                    .font(.system(size: 14, weight: .medium))
+                    .frame(width: 18)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(self.vm.theater?.muted == true ? "Unmute TV" : "Mute TV")
             GlassTrack(
                 progress: self.volume,
                 onScrub: { fraction in
@@ -1280,33 +1568,23 @@ private struct NowPlayingView: View {
                     Task { await self.vm.setTVVolume(percent: Int((fraction * 100).rounded())) }
                 }
             )
-            .frame(width: 130)
-            Button {
-                Task { await self.vm.toggleTVMute() }
-            } label: {
-                Image(systemName: self.vm.theater?.muted == true ? "speaker.slash.fill"
-                      : self.volume < 0.5 ? "speaker.wave.1.fill" : "speaker.wave.3.fill")
-                    .font(.system(size: 15, weight: .medium))
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help(self.vm.theater?.muted == true ? "Unmute TV" : "Mute TV")
+            .frame(maxWidth: .infinity)
             Text("\(Int((self.volume * 100).rounded()))")
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.white.opacity(0.75))
-                .frame(width: 22)
+                .frame(width: 24, alignment: .trailing)
         }
         .foregroundStyle(.white)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 11)
-        .glassEffect(.regular, in: .capsule)
+        .padding(.horizontal, 15)
+        .padding(.vertical, 10)
+        .homeTheaterGlassCapsule()
         .help("TV volume")
     }
 
     // Optional secondary control: ExoPlayer's internal volume (pre-amp gain).
     // Off by default; enabled via Settings → "Player volume as secondary control".
     private var playerVolumeCapsule: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 12) {
             GlassTrack(
                 progress: self.playerVolume,
                 onScrub: { fraction in
@@ -1319,67 +1597,41 @@ private struct NowPlayingView: View {
                     Task { await self.vm.setPlaybackVolume(percent: Int((fraction * 100).rounded())) }
                 }
             )
-            .frame(width: 90)
-            Image(systemName: "dial.medium")
-                .font(.system(size: 13, weight: .medium))
+            .frame(maxWidth: .infinity)
             Text("\(Int((self.playerVolume * 100).rounded()))")
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.white.opacity(0.7))
-                .frame(width: 22)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.white.opacity(0.75))
+                .frame(width: 24, alignment: .trailing)
         }
         .foregroundStyle(.white.opacity(0.9))
-        .padding(.horizontal, 13)
-        .padding(.vertical, 8)
-        .glassEffect(.regular, in: .capsule)
+        .padding(.horizontal, 15)
+        .padding(.vertical, 10)
+        .homeTheaterGlassCapsule()
         .help("Player volume (internal pre-amp gain)")
     }
 
-    // All home-theater controls on the main stage. Always shown so they're discoverable;
-    // dimmed + disabled until the ADB (home-theater) connection is up.
-    private var audioControls: some View {
-        VStack(spacing: 10) {
-            HStack(spacing: 12) {
-                levelCapsule(icon: "hifispeaker.fill", label: "SUB", value: self.$subwooferLevel) { level in
-                    await self.vm.setSubwoofer(level)
-                }
-                levelCapsule(icon: "surround.sound", label: "REAR", value: self.$rearLevel) { level in
-                    await self.vm.setRear(level)
-                }
-            }
-            HStack(spacing: 12) {
-                self.soundModeCapsule
-                self.immersiveCapsule
-            }
-        }
-        .opacity(self.vm.isBridgeConnected ? 1 : 0.45)
-        .disabled(!self.vm.isBridgeConnected)
-        .help(self.vm.isBridgeConnected ? "Home-theater controls" : "Connect ADB to control the home theater")
-    }
-
     private var soundModeCapsule: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "music.note")
-                .font(.system(size: 13, weight: .medium))
-            Menu {
-                ForEach(SmartTubeSoundMode.allCases, id: \.self) { mode in
-                    Button(mode.rawValue.capitalized) {
-                        self.soundMode = mode
-                        Task { await self.vm.setSoundMode(mode) }
-                    }
-                }
-            } label: {
-                HStack(spacing: 4) {
-                    Text(self.soundMode.rawValue.capitalized)
-                    Image(systemName: "chevron.up.chevron.down").font(.system(size: 9))
+        Menu {
+            ForEach(SmartTubeSoundMode.allCases, id: \.self) { mode in
+                Button(mode.rawValue.capitalized) {
+                    self.soundMode = mode
+                    Task { await self.vm.setSoundMode(mode) }
                 }
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
+        } label: {
+            HStack(spacing: 5) {
+                Text(self.soundMode.rawValue.capitalized)
+                    .font(.system(size: 12, weight: .semibold))
+                Image(systemName: "chevron.up.chevron.down").font(.system(size: 9, weight: .semibold))
+            }
         }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
         .foregroundStyle(.white)
-        .padding(.horizontal, 14)
+        .padding(.horizontal, 15)
         .padding(.vertical, 9)
-        .glassEffect(.regular, in: .capsule)
+        .homeTheaterGlassCapsule()
     }
 
     private var immersiveCapsule: some View {
@@ -1388,30 +1640,30 @@ private struct NowPlayingView: View {
             self.immersiveAE = next
             Task { await self.vm.setImmersive(next) }
         } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "airpodspro")
-                    .font(.system(size: 13, weight: .medium))
-                Text("Immersive")
-                    .font(.system(size: 12, weight: .semibold))
-                Image(systemName: self.immersiveAE ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 12))
-                    .foregroundStyle(self.immersiveAE ? Color.accentColor : .white.opacity(0.5))
-            }
+            self.miniSwitch(on: self.immersiveAE)
         }
         .buttonStyle(.plain)
-        .foregroundStyle(.white)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 9)
-        .glassEffect(.regular.tint(self.immersiveAE ? Color.accentColor.opacity(0.5) : nil), in: .capsule)
+        .help(self.immersiveAE ? "Spatial audio on" : "Spatial audio off")
     }
 
-    private func levelCapsule(icon: String, label: String, value: Binding<Double>, action: @escaping (Double) async -> Void) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: icon)
-                .font(.system(size: 13, weight: .medium))
-            Text(label)
-                .font(.system(size: 10, weight: .bold))
-                .foregroundStyle(.white.opacity(0.7))
+    // A compact iOS-style on/off switch, sized to sit on the right of a control row.
+    private func miniSwitch(on: Bool) -> some View {
+        ZStack(alignment: on ? .trailing : .leading) {
+            Capsule()
+                .fill(on ? Color.accentColor : Color.white.opacity(0.18))
+                .overlay { Capsule().strokeBorder(.white.opacity(0.16), lineWidth: 1) }
+                .frame(width: 42, height: 25)
+            Circle()
+                .fill(.white)
+                .frame(width: 19, height: 19)
+                .padding(3)
+                .shadow(color: .black.opacity(0.28), radius: 2, y: 1)
+        }
+        .animation(.smooth(duration: 0.2), value: on)
+    }
+
+    private func levelCapsule(value: Binding<Double>, action: @escaping (Double) async -> Void) -> some View {
+        HStack(spacing: 12) {
             GlassTrack(
                 progress: value.wrappedValue / 12.0,
                 onScrub: { fraction in value.wrappedValue = (fraction * 12).rounded() },
@@ -1421,76 +1673,55 @@ private struct NowPlayingView: View {
                     Task { await action(level) }
                 }
             )
-            .frame(width: 70)
+            .frame(maxWidth: .infinity)
             Text("\(Int(value.wrappedValue))")
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.white.opacity(0.8))
-                .frame(width: 16)
+                .frame(width: 24, alignment: .trailing)
         }
         .foregroundStyle(.white)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 9)
-        .glassEffect(.regular, in: .capsule)
-    }
-
-    // The Now Playing panel: title/channel, centered transport, and the scrubber all
-    // live in one floating glass surface — the standard macOS media-player cluster.
-    private var controlPanel: some View {
-        VStack(spacing: 14) {
-            VStack(spacing: 3) {
-                Text(self.vm.title)
-                    .font(.headline)
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-                Text(self.vm.subtitle)
-                    .font(.subheadline)
-                    .foregroundStyle(.white.opacity(0.65))
-                    .lineLimit(1)
-            }
-            .frame(maxWidth: .infinity)
-            self.transportCluster
-            self.scrubber
-        }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 18)
-        .frame(maxWidth: 560)
-        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
-        .padding(.bottom, 12)
+        .padding(.horizontal, 15)
+        .padding(.vertical, 10)
+        .homeTheaterGlassCapsule()
     }
 
     private var transportCluster: some View {
         GlassEffectContainer(spacing: 18) {
             HStack(spacing: 18) {
-                glassButton("backward.end.fill", help: "Previous") { await self.vm.previous() }
-                glassButton("gobackward.10", help: "Back 10 seconds") { await self.vm.seekBy(seconds: -10) }
+                glassButton("backward.end.fill", size: .secondary, help: "Previous") { await self.vm.previous() }
+                glassButton("gobackward.10", size: .primary, help: "Back 10 seconds") { await self.vm.seekBy(seconds: -10) }
                 Button {
                     Task { await self.vm.togglePlay() }
                 } label: {
-                    Image(systemName: self.vm.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 26, weight: .bold))
-                        .foregroundStyle(.white)
-                        .frame(width: 44, height: 44)
-                        .contentShape(Rectangle())
+                    if self.vm.isBuffering {
+                        ProgressView()
+                            .controlSize(.regular)
+                            .tint(.white)
+                    } else {
+                        Image(systemName: self.vm.isPlaying ? "pause.fill" : "play.fill")
+                    }
                 }
-                .buttonStyle(.glass)
-                .help(self.vm.isPlaying ? "Pause" : "Play")
-                glassButton("goforward.10", help: "Forward 10 seconds") { await self.vm.seekBy(seconds: 10) }
-                glassButton("forward.end.fill", help: "Next") { await self.vm.next() }
+                .buttonStyle(PlayerGlassButtonStyle(size: .play))
+                .help(self.vm.isBuffering ? "Buffering" : self.vm.isPlaying ? "Pause" : "Play")
+                glassButton("goforward.10", size: .primary, help: "Forward 10 seconds") { await self.vm.seekBy(seconds: 10) }
+                glassButton("forward.end.fill", size: .secondary, help: "Next") { await self.vm.next() }
             }
             .controlSize(.large)
         }
     }
 
-    private func glassButton(_ symbol: String, help: String, action: @escaping () async -> Void) -> some View {
+    private func glassButton(
+        _ symbol: String,
+        size: PlayerGlassButtonSize,
+        help: String,
+        action: @escaping () async -> Void
+    ) -> some View {
         Button {
             Task { await action() }
         } label: {
             Image(systemName: symbol)
-                .font(.system(size: 17, weight: .semibold))
-                .frame(width: 30, height: 30)
-                .contentShape(Rectangle())
         }
-        .buttonStyle(.glass)
+        .buttonStyle(PlayerGlassButtonStyle(size: size))
         .help(help)
     }
 
@@ -1517,15 +1748,25 @@ private struct NowPlayingView: View {
         .font(.caption.monospacedDigit())
     }
 
-    // Single smart field: a URL/ID plays directly, anything else searches. Plus a menu for queueing.
+    // Single smart field: a URL/ID plays directly; anything else searches as you
+    // type and shows a results picker floating above the bar.
     private var playBar: some View {
         HStack(spacing: 10) {
-            Image(systemName: "play.circle")
+            Image(systemName: self.vm.isSearching ? "magnifyingglass" : "play.circle")
                 .foregroundStyle(.secondary)
+                .contentTransition(.symbolEffect(.replace))
             TextField("Play a YouTube URL, video ID, or search…", text: self.$videoText)
                 .textFieldStyle(.plain)
                 .onSubmit { self.submit() }
             if !self.isEmpty {
+                Button {
+                    self.clearSearch()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Clear")
                 Button("Play") { self.submit() }
                     .buttonStyle(.glassProminent)
                     .controlSize(.small)
@@ -1543,15 +1784,99 @@ private struct NowPlayingView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
         .glassEffect(.regular, in: .capsule)
+        .overlay(alignment: .top) {
+            if self.searchPanelVisible {
+                self.searchResultsPanel
+                    // Anchor the panel's bottom edge just above the bar's top edge,
+                    // so it floats over the stage without disturbing layout.
+                    .alignmentGuide(.top) { dimensions in dimensions[.bottom] + 10 }
+            }
+        }
+        .onChange(of: self.videoText) { _, text in self.scheduleSearch(text) }
+        .onExitCommand { self.clearSearch() }
+        .animation(.smooth(duration: 0.2), value: self.searchPanelVisible)
+    }
+
+    private var searchPanelVisible: Bool {
+        !self.isEmpty && (self.vm.isSearching || !self.vm.searchResults.isEmpty)
+    }
+
+    private var searchResultsPanel: some View {
+        Group {
+            if self.vm.searchResults.isEmpty {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Searching…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 1) {
+                        ForEach(self.vm.searchResults) { item in
+                            SearchResultRow(item: item) {
+                                self.playResult(item)
+                            } queueAction: { next in
+                                guard let id = item.videoId else { return }
+                                Task { next ? await self.vm.playNext(id) : await self.vm.addToQueue(id) }
+                            }
+                        }
+                    }
+                    .padding(6)
+                }
+                .frame(height: min(CGFloat(self.vm.searchResults.count) * 52 + 12, 312))
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(.white.opacity(0.10), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.32), radius: 16, y: 6)
+        .transition(.opacity.combined(with: .move(edge: .bottom)))
+    }
+
+    private func playResult(_ item: QueueItem) {
+        guard let id = item.videoId else { return }
+        self.clearSearch()
+        Task { await self.vm.playVideoId(id) }
+    }
+
+    private func clearSearch() {
+        self.searchDebounce?.cancel()
+        self.videoText = ""
+        self.vm.clearSearchResults()
+    }
+
+    private func scheduleSearch(_ text: String) {
+        self.searchDebounce?.cancel()
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, !Self.looksLikeVideo(trimmed) else {
+            self.vm.clearSearchResults()
+            return
+        }
+        self.searchDebounce = Task {
+            try? await Task.sleep(for: .milliseconds(350))
+            guard !Task.isCancelled else { return }
+            await self.vm.search(trimmed)
+        }
     }
 
     private func submit() {
         let v = self.videoText.trimmingCharacters(in: .whitespaces)
         guard !v.isEmpty else { return }
-        self.videoText = ""
+        // Prefer the first concrete search result over the server's blind
+        // search-and-play, so Enter plays exactly what the picker shows.
+        let firstResult = self.vm.searchResults.first?.videoId
+        self.clearSearch()
         Task {
             if Self.looksLikeVideo(v) {
                 await self.vm.openVideo(v)
+            } else if let id = firstResult {
+                await self.vm.playVideoId(id)
             } else {
                 await self.vm.searchAndPlay(v)
             }
@@ -1568,6 +1893,227 @@ private struct NowPlayingView: View {
     private static func looksLikeVideo(_ text: String) -> Bool {
         if text.contains("youtube.com") || text.contains("youtu.be") || text.contains("/") { return true }
         return text.range(of: "^[A-Za-z0-9_-]{11}$", options: .regularExpression) != nil
+    }
+}
+
+// One row in the search-results picker: thumbnail, title/channel, duration.
+// Click plays; right-click (or the hover ellipsis) queues.
+private struct SearchResultRow: View {
+    let item: QueueItem
+    let playAction: () -> Void
+    let queueAction: (_ next: Bool) -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: self.playAction) {
+            HStack(spacing: 10) {
+                AsyncImage(url: self.item.thumbnailUrl.flatMap(URL.init)) { phase in
+                    if let image = phase.image {
+                        image.resizable().scaledToFill()
+                    } else {
+                        Rectangle().fill(.quaternary)
+                    }
+                }
+                .frame(width: 71, height: 40)
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(self.item.title ?? "Untitled")
+                        .font(.system(size: 12, weight: .medium))
+                        .lineLimit(1)
+                    Text(self.item.author ?? "")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 8)
+
+                if self.hovering {
+                    Menu {
+                        Button("Add to Queue") { self.queueAction(false) }
+                        Button("Play Next") { self.queueAction(true) }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                            .foregroundStyle(.secondary)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                } else if self.item.isLive == true {
+                    Text("LIVE")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.red)
+                } else if let ms = self.item.durationMs, ms > 0 {
+                    Text(SmartTubeControllerViewModel.formatTime(ms))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(.primary.opacity(self.hovering ? 0.08 : 0))
+        )
+        .onHover { self.hovering = $0 }
+        .contextMenu {
+            Button("Add to Queue") { self.queueAction(false) }
+            Button("Play Next") { self.queueAction(true) }
+        }
+    }
+}
+
+private enum PlayerGlassButtonSize {
+    case secondary
+    case primary
+    case play
+
+    var diameter: CGFloat {
+        switch self {
+        case .secondary: 48
+        case .primary: 62
+        case .play: 88
+        }
+    }
+
+    var iconSize: CGFloat {
+        switch self {
+        case .secondary: 17
+        case .primary: 23
+        case .play: 36
+        }
+    }
+
+    var iconWeight: Font.Weight {
+        switch self {
+        case .secondary: .semibold
+        case .primary, .play: .bold
+        }
+    }
+
+    var shadowRadius: CGFloat {
+        switch self {
+        case .secondary: 8
+        case .primary: 11
+        case .play: 15
+        }
+    }
+
+    var fillOpacity: Double {
+        switch self {
+        case .secondary: 0.05
+        case .primary: 0.08
+        case .play: 0.10
+        }
+    }
+
+    var glassTintOpacity: Double {
+        switch self {
+        case .secondary: 0.02
+        case .primary: 0.045
+        case .play: 0.065
+        }
+    }
+}
+
+private struct PlayerGlassButtonStyle: ButtonStyle {
+    let size: PlayerGlassButtonSize
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: self.size.iconSize, weight: self.size.iconWeight))
+            .foregroundStyle(.white)
+            .frame(width: self.size.diameter, height: self.size.diameter)
+            .contentShape(Circle())
+            .background {
+                Circle()
+                    .fill(.white.opacity(configuration.isPressed ? self.size.fillOpacity + 0.05 : self.size.fillOpacity))
+            }
+            .glassEffect(.clear.interactive().tint(.white.opacity(configuration.isPressed ? self.size.glassTintOpacity + 0.05 : self.size.glassTintOpacity)), in: Circle())
+            .overlay {
+                Circle()
+                    .strokeBorder(.white.opacity(configuration.isPressed ? 0.62 : 0.38), lineWidth: 1.1)
+            }
+            .overlay(alignment: .top) {
+                Circle()
+                    .trim(from: 0.07, to: 0.43)
+                    .stroke(.white.opacity(configuration.isPressed ? 0.18 : 0.42), lineWidth: 1.35)
+                    .frame(width: self.size.diameter - 6, height: self.size.diameter - 6)
+                    .blur(radius: 0.25)
+                    .allowsHitTesting(false)
+            }
+            .overlay(alignment: .bottomTrailing) {
+                Circle()
+                    .trim(from: 0.56, to: 0.80)
+                    .stroke(.black.opacity(configuration.isPressed ? 0.06 : 0.16), lineWidth: 1.2)
+                    .frame(width: self.size.diameter - 5, height: self.size.diameter - 5)
+                    .blur(radius: 0.35)
+                    .allowsHitTesting(false)
+            }
+            .shadow(color: .black.opacity(0.38), radius: self.size.shadowRadius, y: self.size.shadowRadius * 0.24)
+            .shadow(color: .white.opacity(0.16), radius: 1.5, y: -0.8)
+            .scaleEffect(configuration.isPressed ? 0.965 : 1)
+            .animation(.smooth(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
+// Reports the window's titlebar+toolbar height (frame minus contentLayoutRect).
+// The split-view detail gets no top safe-area inset on macOS 26, so views that
+// shouldn't sit under the glass toolbar pad themselves down by this amount.
+private struct TitlebarHeightReader: NSViewRepresentable {
+    @Binding var height: CGFloat
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async { self.report(view) }
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        DispatchQueue.main.async { self.report(view) }
+    }
+
+    private func report(_ view: NSView) {
+        guard let window = view.window else { return }
+        let measured = window.frame.height - window.contentLayoutRect.height
+        if abs(measured - self.height) > 0.5 {
+            self.height = measured
+        }
+    }
+}
+
+private struct HomeTheaterGlassCapsule: ViewModifier {
+    var tint: Color?
+
+    func body(content: Content) -> some View {
+        content
+            .background {
+                Capsule()
+                    .fill(.white.opacity(0.035))
+            }
+            .glassEffect(.clear.interactive().tint(self.tint ?? .white.opacity(0.025)), in: .capsule)
+            .overlay {
+                Capsule()
+                    .strokeBorder(.white.opacity(0.20), lineWidth: 1)
+            }
+            .overlay(alignment: .top) {
+                Capsule()
+                    .trim(from: 0.06, to: 0.42)
+                    .stroke(.white.opacity(0.28), lineWidth: 1)
+                    .padding(2)
+                    .allowsHitTesting(false)
+            }
+            .shadow(color: .black.opacity(0.24), radius: 7, y: 2)
+    }
+}
+
+private extension View {
+    func homeTheaterGlassCapsule(tint: Color? = nil) -> some View {
+        self.modifier(HomeTheaterGlassCapsule(tint: tint))
     }
 }
 

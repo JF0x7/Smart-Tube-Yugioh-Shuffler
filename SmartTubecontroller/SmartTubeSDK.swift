@@ -1025,6 +1025,16 @@ public actor SmartTubeClient {
         try await request("POST", "/api/content/search", body: SearchBody(query: query), response: OKResponse.self)
     }
 
+    /// Search YouTube and return the result list without starting playback.
+    public func searchResults(_ query: String, limit: Int = 20) async throws -> [SuggestionItem] {
+        try await request(
+            "GET",
+            "/api/content/search/results",
+            query: ["query": query, "limit": String(limit)],
+            response: [SuggestionItem].self
+        )
+    }
+
     public func getSuggestions() async throws -> [SuggestionItem] {
         try await request("GET", "/api/content/suggestions", response: [SuggestionItem].self)
     }
