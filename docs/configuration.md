@@ -25,7 +25,9 @@ All settings are stored in `UserDefaults` and editable from the Settings sheet (
 
 ## SmartTube REST API
 
-The app wraps SmartTube's HTTP API on port `8497`. Key endpoints used:
+This controller requires the [akver fork](https://github.com/akshaynexus/SmartTube/tree/akver) of SmartTube. The official build does not expose the REST API.
+
+The app communicates over HTTP on port `8497`. Key endpoints used:
 
 - `GET /api/system/ping` — connection check
 - `GET /api/pair` / `POST /api/pair/verify` — pairing

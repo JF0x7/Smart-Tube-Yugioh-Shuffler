@@ -1,6 +1,8 @@
 # SmartTubecontroller
 
-A native macOS remote control for [SmartTube](https://github.com/yuliskov/SmartTube) — the ad-free YouTube client for Android TV.
+A native macOS remote control for [SmartTube](https://github.com/akshaynexus/SmartTube/tree/akver) — the ad-free YouTube client for Android TV.
+
+> **Note:** This app requires the [akver fork](https://github.com/akshaynexus/SmartTube/tree/akver) of SmartTube, which includes the custom REST API used for communication. The official SmartTube build does not have this API.
 
 <p align="center">
   <img src="screenshots/main_screenshot_hero.png" alt="SmartTubecontroller" width="800" />
@@ -49,6 +51,19 @@ SmartTubecontroller talks to a SmartTube instance running on your Android TV (or
   ```
   brew install android-platform-tools
   ```
+
+## Building SmartTube (akver fork)
+
+The official SmartTube APK does not include the REST API this controller depends on. You must build the fork:
+
+1. Clone the fork and checkout the `akver` branch:
+   ```
+   git clone https://github.com/akshaynexus/SmartTube.git
+   cd SmartTube
+   git checkout akver
+   ```
+2. Build the APK following the SmartTube [build instructions](https://github.com/akshaynexus/SmartTube/tree/akver#build).
+3. Sideload the APK onto your Android TV via `adb` or a USB drive.
 
 ## Build & Run
 
