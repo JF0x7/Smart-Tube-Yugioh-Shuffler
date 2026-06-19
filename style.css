@@ -108,6 +108,18 @@ button:hover {
   z-index: 10;
   box-shadow: 0 0 12px #f7e7b2;
 }
+.YQ{
+  width: 200px;
+  height: 230px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  margin: 0 auto; /* centers horizontally */
+  position: relative;
+  overflow: hidden;
+}
 .Mpuzzle {
   width: 200px;
   height: 230px;
