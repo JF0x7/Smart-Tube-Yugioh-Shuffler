@@ -121,7 +121,18 @@ button:hover {
   position: relative;
   overflow: hidden;
 }
-
+.YQ {
+  width: 200px;
+  height: 230px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  margin: 0 auto; /* centers horizontally */
+  position: relative;
+  overflow: hidden;
+}
 /* Center the image and add a glow pulse */
 .Mpuzzle img {
   width: 160px;
