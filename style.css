@@ -121,6 +121,13 @@ button:hover {
   position: relative;
   overflow: hidden;
 }
+/* Center the image and add a glow pulse */
+.Mpuzzle img {
+  width: 160px;
+  height: auto;
+  filter: drop-shadow(0 0 8px #b89b4a);
+  animation: glowPulse 2.5s infinite ease-in-out;
+}
 .YQ {
   width: 200px;
   height: 230px;
@@ -133,14 +140,6 @@ button:hover {
   position: relative;
   overflow: hidden;
 }
-/* Center the image and add a glow pulse */
-.Mpuzzle img {
-  width: 160px;
-  height: auto;
-  filter: drop-shadow(0 0 8px #b89b4a);
-  animation: glowPulse 2.5s infinite ease-in-out;
-}
-
 /* Glowing pulse animation */
 @keyframes glowPulse {
   0% {
