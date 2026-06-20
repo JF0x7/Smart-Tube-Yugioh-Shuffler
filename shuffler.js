@@ -20,10 +20,11 @@ const baseDeck = [
   { name: "McGregor Horseman", image: "cards/McGregor Horseman.png" },
   { name: "Profesor", image: "cards/Profesor.png" },
   { name: "Rzufirr", image: "cards/RZUFIR.png" },
- { name: "Toon Dark Knight", image: "cards/TW DN.png" },
- { name: "Widespread Ruin", image: "cards/Widespread ruin.jpg" },
-
-
+  { name: "Toon Dark Knight", image: "cards/TW DN.png" },
+  { name: "Widespread Ruin", image: "cards/Widespread Ruin.jpg" },
+  { name: "Qtum Goat Token", image: "cards/qtum goat token.jpg" },
+  { name: "Toon Enchantress", image: "cards/toon enchantress.png" },
+  { name: "Varnyx", image: "cards/varnyx.png" },
 ];
 
 const deck = [];
