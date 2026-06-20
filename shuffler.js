@@ -83,14 +83,3 @@ function updateHandLayout() {
   const hand = document.getElementById("hand");
   const cards = hand.querySelectorAll(".card");
   const count = cards.length;
-
-  hand.style.setProperty("--hand-size", count);
-
-  cards.forEach((card, index) => {
-    const middle = (count - 1) / 2;
-    const offset = index - middle;
-    card.style.setProperty("--i", offset);
-  });
-
-  document.getElementById("hand-count").textContent = count;
-}
