@@ -79,7 +79,7 @@ function resetDeck() {
 // Load deck on start
 resetDeck();
 
-// (Restored to empty — no adaptive hand logic)
+// Empty layout function (kept for compatibility)
 function updateHandLayout() {
   const hand = document.getElementById("hand");
   const cards = hand.querySelectorAll(".card");
