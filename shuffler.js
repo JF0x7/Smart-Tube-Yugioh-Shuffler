@@ -83,3 +83,4 @@ function updateHandLayout() {
   const hand = document.getElementById("hand");
   const cards = hand.querySelectorAll(".card");
   const count = cards.length;
+}
