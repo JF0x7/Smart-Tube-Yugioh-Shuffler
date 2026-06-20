@@ -1,5 +1,4 @@
-
-  // SmartTubeYu-Gi-Oh Image Shuffler
+// SmartTubeYu-Gi-Oh Image Shuffler
 
 // Original deck list
 const baseDeck = [
@@ -79,6 +78,8 @@ function resetDeck() {
 
 // Load deck on start
 resetDeck();
+
+// (Restored to empty — no adaptive hand logic)
 function updateHandLayout() {
   const hand = document.getElementById("hand");
   const cards = hand.querySelectorAll(".card");
