@@ -16,19 +16,32 @@ body {
 /* ===== HEADERS ===== */
 .HeaderOne {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  align-items: center;     /* vertical centering */
+  justify-content: center; /* centers the whole group horizontally */
+  gap: 20px;               /* space between logos and text */
+  text-align: center;
 }
 
+/* Left logo */
 #QE {
   width: 77.7px;
   height: auto;
 }
 
+/* Right logo */
 #ST {
-  width:200px;
+  width: 200px;
   height: auto;
 }
+
+/* Center text */
+.HeaderOne h1 {
+  flex: 0 1 auto;          /* allows text to stay centered */
+  margin: 0;
+  color: #f7e7b2;
+  letter-spacing: 2px;
+}
+
 
 h1, h2, h3 {
   text-align: center;
