@@ -189,5 +189,9 @@ button:hover {
   padding: 0;
   width: auto;
   height: auto;
+  width: 150px;   /* same as deck */
+  height: auto;
+  border: none;
+  box-shadow: none;
 }
 
