@@ -4,7 +4,7 @@
 const baseDeck = [
   { name: "Clockwork Brother - Gearheart Wizard", image: "cards/ClockWorkBroGW.png" },
   { name: "Clamshell Security", image: "cards/clamshellsecurity.jpg" },
-  { name: "Blue-Eyes White Dragon", image: "cards/BlueEyes.png" },
+  { name: "Toon Eldritch Ape", image: "cards/Disrespect.jpg" },
   { name: "The ClockWork Brother Grim", image: "cards/ClockBros.jpg" },
   { name: "Rainbow Ranger 69", image: "cards/69Horseman.jpg" },
   { name: "Aurelion", image: "cards/Aurelion.png" },
@@ -14,6 +14,16 @@ const baseDeck = [
   { name: "Concor", image: "cards/Concor.png" },
   { name: "Black Luster Cavalier", image: "cards/DarkKnight.jpg" },
   { name: "DDN Network Interconnect", image: "cards/DDN.jpg" },
+  { name: "Dorsey the Ultimate Horseman", image: "cards/Dorsey Horseman.png" },
+  { name: "Japanese OG", image: "cards/Japanese OG.png" },
+  { name: "Kixter", image: "cards/Kixter.jpg" },
+  { name: "McGregor Horseman", image: "cards/McGregor Horseman.png" },
+  { name: "Profesor", image: "cards/Profesor.png" },
+  { name: "Rzufirr", image: "cards/RZUFIR.png" },
+ { name: "Toon Dark Knight", image: "cards/TW DN.png" },
+ { name: "Widespread Ruin", image: "cards/Widespread ruin.jpg" },
+
+
 ];
 
 const deck = [];
