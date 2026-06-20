@@ -155,4 +155,69 @@ button:hover {
   }
 }
 
+.hand-title {
+  text-align: center;
+  margin-bottom: 10px;
+  color: #d7c27a;
+  text-shadow: 0 0 8px #000;
+  font-family: 'Cinzel', serif;
+}
+
+/* The whole hand area */
+.hand-zone {
+  position: relative;
+  width: 100%;
+  min-height: 180px;
+
+  display: flex;
+  justify-content: center;
+  align-items: flex-end;
+
+  perspective: 1200px;
+  padding: 20px 0;
+
+  transition: background 0.3s ease;
+  background: rgba(20, 14, 6, 0.4);
+  border-top: 2px solid #b89b4a55;
+  border-bottom: 2px solid #b89b4a55;
+}
+
+/* Each card in your hand */
+.hand-zone .card {
+  position: relative;
+  transition: transform 0.25s ease, filter 0.25s ease;
+  transform-origin: bottom center;
+  cursor: pointer;
+
+  /* Adaptive spacing */
+  margin: 0 calc(8px - (var(--hand-size) * 0.2px));
+}
+
+/* Curved arc effect */
+.hand-zone .card {
+  transform: rotate(calc(var(--i) * 6deg)) translateY(calc(var(--i) * -4px));
+}
+
+/* Hover = pick up the card */
+.hand-zone .card:hover {
+  transform: translateY(-40px) scale(1.15) rotate(0deg);
+  filter: brightness(1.2);
+  z-index: 999;
+}
+
+/* Card images */
+.hand-zone .card img {
+  width: 110px;
+  height: auto;
+  border-radius: 6px;
+  box-shadow: 0 0 12px #000;
+  transition: inherit;
+}
+
+/* Mobile scaling */
+@media (max-width: 600px) {
+  .hand-zone .card img {
+    width: 70px;
+  }
+}
 
