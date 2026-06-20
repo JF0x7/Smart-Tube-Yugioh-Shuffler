@@ -173,6 +173,6 @@ button:hover {
   box-shadow: none; /* ensures no glow */
 }
 #hand .card {
-  display: inline-block;
+  display: block;
 }
 
